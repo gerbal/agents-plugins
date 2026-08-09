@@ -160,19 +160,38 @@ The server reads these environment variables (all optional):
 | --- | --- | --- |
 | `GAMEFACE_HOST` | `localhost` | Host of the Gameface CDP endpoint. |
 | `GAMEFACE_PORT` | `9444` | Port of the Gameface CDP endpoint. |
+| `GAMEFACE_PORT_FILE` | _(unset)_ | File to read the live port from (see below). |
+| `GAMEFACE_PORT_FILE_KEY` | `port` | Key holding the port when that file is JSON. |
 | `GAMEFACE_CONNECT_TIMEOUT_MS` | `5000` | HTTP discovery / WebSocket open timeout. |
 | `GAMEFACE_CALL_TIMEOUT_MS` | `15000` | Per-command reply timeout. |
 
-**On Claude Code**, the plugin's [`.mcp.json`](.mcp.json) forwards `GAMEFACE_HOST` and
-`GAMEFACE_PORT` from your environment (`${VAR:-default}`); the timeout variables fall back to
-their defaults unless the server's environment provides them. An extra `GAMEFACE_MCP_RUNTIME`
-variable (default `node`) overrides the runtime used to launch the server.
+**On Claude Code**, the plugin's [`.mcp.json`](.mcp.json) forwards `GAMEFACE_HOST`,
+`GAMEFACE_PORT`, `GAMEFACE_PORT_FILE`, and `GAMEFACE_PORT_FILE_KEY` from your environment
+(`${VAR:-default}`); the timeout variables fall back to their defaults unless the server's
+environment provides them. An extra `GAMEFACE_MCP_RUNTIME` variable (default `node`) overrides the
+runtime used to launch the server.
 
 **On Codex CLI**, the plugin config passes no environment block (Codex does not interpolate
 `${VAR}` placeholders, and `~/.codex/config.toml` cannot override a plugin-provided server), so the
 server always starts with the defaults above. If you need non-default settings, register the
 npm-published server manually with `codex mcp add` and the environment you want; it replaces the
 plugin's copy under the same name (see [`mcp/README.md`](mcp/README.md)).
+
+### Following a port chosen at launch
+
+Games commonly take their debug port as a launch argument, decided long after your agent (and this
+server with it) started, so no environment variable can name it. Two ways out, and the endpoint in
+force is always reported by `game_status` as `portSource`:
+
+- **`game_target`** switches the endpoint at runtime: `game_target` with a `port` points every other
+  `game_*` tool at it and probes what answers there. `reset: true` undoes the switch, and calling it
+  with no arguments just re-resolves.
+- **`GAMEFACE_PORT_FILE`** points at a file your launcher writes the port to — a bare number, or a
+  JSON object carrying it under `GAMEFACE_PORT_FILE_KEY`. It is re-read on every connection attempt,
+  so a game relaunched on another port is followed with no action from the agent.
+
+Precedence is `game_target` > port file > `GAMEFACE_PORT` > `9444`. A port file that is missing or
+malformed is not fatal: the server falls back to the environment and reports why under `portFile`.
 
 ## Troubleshooting
 

@@ -30324,12 +30324,124 @@ var import_common_tags5 = __toESM(require_lib(), 1);
 // src/cdp.ts
 var import_common_tags = __toESM(require_lib(), 1);
 
+// src/endpoint.ts
+import { readFile } from "node:fs/promises";
+var MAX_PORT = 65535;
+
+class EndpointResolver {
+  cfg;
+  hostOverride;
+  portOverride;
+  lastPortFile;
+  lastEndpoint;
+  constructor(cfg) {
+    this.cfg = cfg;
+    this.lastEndpoint = staticEndpoint(cfg);
+  }
+  get current() {
+    return this.lastEndpoint;
+  }
+  get portFile() {
+    return this.lastPortFile;
+  }
+  get hasOverride() {
+    return this.hostOverride != null || this.portOverride != null;
+  }
+  async resolve() {
+    const host = this.hostOverride ?? this.cfg.host;
+    if (this.portOverride != null) {
+      return this.remember({ host, port: this.portOverride, source: "override" });
+    }
+    const fromFile = await this.readPortFile();
+    if (fromFile != null) {
+      return this.remember({ host, port: fromFile, source: "file" });
+    }
+    const { port, source } = staticEndpoint(this.cfg);
+    return this.remember({ host, port, source });
+  }
+  setOverride(host, port) {
+    if (host != null) {
+      this.hostOverride = host;
+    }
+    if (port != null) {
+      this.portOverride = port;
+    }
+  }
+  clearOverride() {
+    this.hostOverride = undefined;
+    this.portOverride = undefined;
+  }
+  async readPortFile() {
+    const path = this.cfg.portFile;
+    if (path == undefined) {
+      this.lastPortFile = undefined;
+      return;
+    }
+    const key = this.cfg.portFileKey;
+    let raw;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (error52) {
+      this.lastPortFile = { path, key, port: undefined, error: describeError(error52) };
+      return;
+    }
+    const { port, error: error51 } = parsePortFile(raw, key);
+    this.lastPortFile = { path, key, port, error: error51 };
+    return port;
+  }
+  remember(endpoint) {
+    this.lastEndpoint = endpoint;
+    return endpoint;
+  }
+}
+function staticEndpoint(cfg) {
+  return { host: cfg.host, port: cfg.port, source: cfg.portIsExplicit ? "env" : "default" };
+}
+function parsePortFile(raw, key) {
+  const trimmed = raw.trim();
+  if (trimmed.length == 0) {
+    return { error: `file is empty` };
+  }
+  if (/^\d+$/u.test(trimmed)) {
+    return validatePort(Number(trimmed), `file`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { error: `not a bare port number, and not valid JSON` };
+  }
+  if (typeof parsed != "object" || parsed == null || Array.isArray(parsed)) {
+    return { error: `JSON is not an object, so key '${key}' cannot be read from it` };
+  }
+  const value = parsed[key];
+  if (value == undefined) {
+    return { error: `JSON object has no '${key}' (set GAMEFACE_PORT_FILE_KEY to the right key)` };
+  }
+  if (typeof value != "number" && typeof value != "string") {
+    return { error: `'${key}' is ${typeof value}, expected a number` };
+  }
+  return validatePort(Number(value), `'${key}'`);
+}
+function validatePort(port, label) {
+  if (!Number.isInteger(port) || port <= 0 || port > MAX_PORT) {
+    return { error: `${label} is not a valid port: ${port}` };
+  }
+  return { port };
+}
+function describeError(error51) {
+  return error51 instanceof Error ? error51.message : String(error51);
+}
+
+// src/cdp.ts
 class GameUnreachableError extends Error {
-  constructor(cfg, cause) {
+  constructor(endpoint, cause) {
     super(import_common_tags.oneLine`
-      Cannot reach the Gameface debug endpoint at http://${cfg.host}:${cfg.port}.
+      Cannot reach the Gameface debug endpoint at http://${endpoint.host}:${endpoint.port}
+      (port from: ${endpoint.source}).
       Make sure the Gameface application is running with its CDP debug port open.
-      Override with GAMEFACE_HOST / GAMEFACE_PORT.
+      If it is running on another port, point the server at it with game_target, or set
+      GAMEFACE_HOST / GAMEFACE_PORT / GAMEFACE_PORT_FILE.
     `);
     this.name = "GameUnreachableError";
     if (cause !== undefined) {
@@ -30353,16 +30465,16 @@ async function fetchWithTimeout(url2, timeoutMs) {
     clearTimeout(timer);
   }
 }
-async function discoverPageTarget(cfg) {
-  const listUrl = `http://${cfg.host}:${cfg.port}/json/list`;
+async function discoverPageTarget(endpoint, timeoutMs) {
+  const listUrl = `http://${endpoint.host}:${endpoint.port}/json/list`;
   let res;
   try {
-    res = await fetchWithTimeout(listUrl, cfg.connectTimeoutMs);
+    res = await fetchWithTimeout(listUrl, timeoutMs);
   } catch (error51) {
-    throw new GameUnreachableError(cfg, error51);
+    throw new GameUnreachableError(endpoint, error51);
   }
   if (!res.ok) {
-    throw new GameUnreachableError(cfg, new Error(`HTTP ${res.status} from ${listUrl}`));
+    throw new GameUnreachableError(endpoint, new Error(`HTTP ${res.status} from ${listUrl}`));
   }
   let list;
   try {
@@ -30380,7 +30492,7 @@ async function discoverPageTarget(cfg) {
     id,
     title: page.title ?? "",
     url: page.url ?? "",
-    wsUrl: `ws://${cfg.host}:${cfg.port}/devtools/page/${id}`
+    wsUrl: `ws://${endpoint.host}:${endpoint.port}/devtools/page/${id}`
   };
 }
 
@@ -30402,14 +30514,14 @@ class CdpConnection {
     ws.addEventListener("close", () => this.handleClose(`connection closed`));
     ws.addEventListener("error", () => this.handleClose(`connection error`));
   }
-  static async open(cfg, target, onEvent) {
+  static async open(cfg, endpoint, target, onEvent) {
     const ws = new WebSocket(target.wsUrl);
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         try {
           ws.close();
         } catch {}
-        reject(new GameUnreachableError(cfg));
+        reject(new GameUnreachableError(endpoint));
       }, cfg.connectTimeoutMs);
       ws.addEventListener("open", () => {
         clearTimeout(timer);
@@ -30417,7 +30529,7 @@ class CdpConnection {
       }, { once: true });
       ws.addEventListener("error", (event) => {
         clearTimeout(timer);
-        reject(new GameUnreachableError(cfg, event));
+        reject(new GameUnreachableError(endpoint, event));
       }, { once: true });
     });
     return new CdpConnection(ws, cfg, target, onEvent);
@@ -30504,11 +30616,34 @@ class CdpClient {
   listeners = new Set;
   connectListeners = new Set;
   cfg;
+  endpoints;
   constructor(cfg) {
     this.cfg = cfg;
+    this.endpoints = new EndpointResolver(cfg);
   }
   get config() {
     return this.cfg;
+  }
+  get endpoint() {
+    return this.endpoints.current;
+  }
+  get portFile() {
+    return this.endpoints.portFile;
+  }
+  resolveEndpoint() {
+    return this.endpoints.resolve();
+  }
+  retarget(options = {}) {
+    if (options.reset == true) {
+      this.endpoints.clearOverride();
+    }
+    this.endpoints.setOverride(options.host, options.port);
+    this.disconnect();
+    return this.endpoints.resolve();
+  }
+  disconnect() {
+    this.conn?.close();
+    this.conn = undefined;
   }
   onEvent(listener) {
     this.listeners.add(listener);
@@ -30522,8 +30657,9 @@ class CdpClient {
       this.connectListeners.delete(listener);
     };
   }
-  discover() {
-    return discoverPageTarget(this.cfg);
+  async discover() {
+    const endpoint = await this.endpoints.resolve();
+    return discoverPageTarget(endpoint, this.cfg.connectTimeoutMs);
   }
   async connection() {
     if (this.conn?.isOpen) {
@@ -30533,8 +30669,9 @@ class CdpClient {
       return this.connecting;
     }
     this.connecting = (async () => {
-      const target = await discoverPageTarget(this.cfg);
-      const conn = await CdpConnection.open(this.cfg, target, (method, params) => {
+      const endpoint = await this.endpoints.resolve();
+      const target = await discoverPageTarget(endpoint, this.cfg.connectTimeoutMs);
+      const conn = await CdpConnection.open(this.cfg, endpoint, target, (method, params) => {
         this.emit(method, params);
       });
       this.conn = conn;
@@ -30560,8 +30697,7 @@ class CdpClient {
       return await conn.call(method, params);
     } catch (error51) {
       if (error51 instanceof CdpError && /closed|not open/iu.test(error51.message)) {
-        this.conn?.close();
-        this.conn = undefined;
+        this.disconnect();
         const fresh = await this.connection();
         return fresh.call(method, params);
       }
@@ -30583,12 +30719,17 @@ class CdpClient {
 
 // src/config.ts
 var DEFAULT_PORT = 9444;
+var DEFAULT_PORT_FILE_KEY = "port";
 var DEFAULT_CONNECT_TIMEOUT_MS = 5000;
 var DEFAULT_CALL_TIMEOUT_MS = 15000;
 function loadConfig() {
+  const envPort = num(process.env.GAMEFACE_PORT, 0);
   return {
     host: str(process.env.GAMEFACE_HOST, "localhost"),
-    port: num(process.env.GAMEFACE_PORT, DEFAULT_PORT),
+    port: envPort > 0 ? envPort : DEFAULT_PORT,
+    portIsExplicit: envPort > 0,
+    portFile: optional3(process.env.GAMEFACE_PORT_FILE),
+    portFileKey: str(process.env.GAMEFACE_PORT_FILE_KEY, DEFAULT_PORT_FILE_KEY),
     connectTimeoutMs: num(process.env.GAMEFACE_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS),
     callTimeoutMs: num(process.env.GAMEFACE_CALL_TIMEOUT_MS, DEFAULT_CALL_TIMEOUT_MS)
   };
@@ -30596,6 +30737,10 @@ function loadConfig() {
 function str(value, fallback) {
   const trimmed = value?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : fallback;
+}
+function optional3(value) {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 function num(value, fallback) {
   const parsed = Number(value);
@@ -31675,7 +31820,7 @@ var DEFAULT_QUIESCENT_MS = 1000;
 var DEFAULT_JPEG_QUALITY = 80;
 var DEFAULT_QUERY_LIMIT = 20;
 async function gameStatus(client, reloads) {
-  const { host, port } = client.config;
+  const { host, port, source } = await client.resolveEndpoint();
   try {
     const target = await client.discover();
     let browser;
@@ -31697,6 +31842,8 @@ async function gameStatus(client, reloads) {
     return text(JSON.stringify({
       reachable: true,
       endpoint: `http://${host}:${port}`,
+      portSource: source,
+      portFile: describePortFile(client.portFile),
       target: { id: target.id, url: target.url, title: target.title, wsUrl: target.wsUrl },
       browser,
       cdpProtocol: protocol,
@@ -31712,13 +31859,51 @@ async function gameStatus(client, reloads) {
     return text(JSON.stringify({
       reachable: false,
       endpoint: `http://${host}:${port}`,
+      portSource: source,
+      portFile: describePortFile(client.portFile),
       error: error51 instanceof Error ? error51.message : String(error51),
       hint: import_common_tags4.oneLine`
             Launch the Gameface application with its CDP debug port open, then retry.
-            Override host/port via GAMEFACE_HOST / GAMEFACE_PORT.
+            If it is up on a different port, switch to it with game_target, or set
+            GAMEFACE_HOST / GAMEFACE_PORT / GAMEFACE_PORT_FILE.
           `
     }, null, 2));
   }
+}
+async function gameTarget(client, options = {}) {
+  const before = client.endpoint;
+  const after = await client.retarget(options);
+  const changed = after.host != before.host || after.port != before.port;
+  let reachable = false;
+  let target;
+  let error51;
+  try {
+    const page = await client.discover();
+    reachable = true;
+    target = page.url;
+  } catch (probeError) {
+    error51 = probeError instanceof Error ? probeError.message : String(probeError);
+  }
+  return text(JSON.stringify({
+    endpoint: `http://${after.host}:${after.port}`,
+    portSource: after.source,
+    portFile: describePortFile(client.portFile),
+    changed,
+    previousEndpoint: changed ? `http://${before.host}:${before.port}` : undefined,
+    reachable,
+    target,
+    error: error51,
+    note: changed ? import_common_tags3.oneLine`
+              Console history and breakpoints predate the switch; breakpoints re-bind on the next
+              connection, console entries do not carry over.
+            ` : undefined
+  }, null, 2));
+}
+function describePortFile(status) {
+  if (!status) {
+    return;
+  }
+  return { path: status.path, key: status.key, port: status.port, error: status.error };
 }
 async function gameEval(client, expression, awaitPromise = false) {
   try {
@@ -32635,6 +32820,7 @@ function rectFn(sel, index) {
 
 // src/server.ts
 var { version: VERSION } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+var MAX_PORT2 = 65535;
 async function main() {
   const config2 = loadConfig();
   const client = new CdpClient(config2);
@@ -32651,6 +32837,26 @@ async function main() {
         Calling it arms reload tracking and returns the baseline count for game_wait's sinceReloads.
       `
   }, () => gameStatus(client, reloads));
+  server.registerTool("game_target", {
+    title: `Point at another Gameface endpoint`,
+    description: import_common_tags4.oneLine`
+        Switch the host/port every other game_* tool talks to, without restarting the server, and
+        probe the result.
+        Use it when the application runs on a debug port that was chosen after this server started
+        (the usual case: the port is a launch argument), which no environment variable can reach.
+        Called with no arguments it re-resolves the endpoint, re-reading GAMEFACE_PORT_FILE if one
+        is configured; reset drops a previous switch and goes back to the file / environment.
+        The switch itself always succeeds; the report says whether anything answered there.
+      `,
+    inputSchema: {
+      port: exports_external.number().int().min(1).max(MAX_PORT2).optional().describe(`Port of the CDP endpoint to talk to from now on`),
+      host: exports_external.string().optional().describe(`Host of the CDP endpoint to talk to from now on (default: unchanged)`),
+      reset: exports_external.boolean().optional().describe(import_common_tags4.oneLine`
+            Drop a previous game_target switch, handing the endpoint back to GAMEFACE_PORT_FILE /
+            GAMEFACE_PORT (default false)
+          `)
+    }
+  }, ({ port, host, reset }) => gameTarget(client, { port, host, reset }));
   server.registerTool("game_eval", {
     title: `Evaluate JS in the Gameface UI`,
     description: import_common_tags5.oneLine`
@@ -32995,7 +33201,11 @@ async function main() {
   }, ({ action }) => debug.step(action));
   const transport = new StdioServerTransport;
   await server.connect(transport);
-  process.stderr.write(`gameface MCP server v${VERSION} ready (target http://${config2.host}:${config2.port})
+  const endpoint = await client.resolveEndpoint();
+  process.stderr.write(`${import_common_tags4.oneLine`
+      gameface MCP server v${VERSION} ready
+      (target http://${endpoint.host}:${endpoint.port}, port from: ${endpoint.source})
+    `}
 `);
 }
 try {

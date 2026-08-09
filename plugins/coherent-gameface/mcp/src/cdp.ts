@@ -9,6 +9,7 @@
 
 import { oneLine } from 'common-tags';
 import type { Config } from './config';
+import { type Endpoint, EndpointResolver, type PortFileStatus } from './endpoint';
 
 /**
  * A discovered CDP page target plus the WebSocket URL we build for it.
@@ -28,12 +29,14 @@ export interface PageTarget {
  * Raised when the Gameface debug endpoint cannot be reached at all.
  */
 export class GameUnreachableError extends Error {
-  public constructor(cfg: Config, cause?: unknown) {
+  public constructor(endpoint: Endpoint, cause?: unknown) {
     // noinspection HttpUrlsUsage
     super(oneLine`
-      Cannot reach the Gameface debug endpoint at http://${cfg.host}:${cfg.port}.
+      Cannot reach the Gameface debug endpoint at http://${endpoint.host}:${endpoint.port}
+      (port from: ${endpoint.source}).
       Make sure the Gameface application is running with its CDP debug port open.
-      Override with GAMEFACE_HOST / GAMEFACE_PORT.
+      If it is running on another port, point the server at it with game_target, or set
+      GAMEFACE_HOST / GAMEFACE_PORT / GAMEFACE_PORT_FILE.
     `);
 
     this.name = 'GameUnreachableError';
@@ -54,6 +57,19 @@ export class CdpError extends Error {
 
     this.name = 'CdpError';
   }
+}
+
+/**
+ * Where to point the client, for CdpClient.retarget.
+ */
+export interface RetargetOptions {
+  readonly host?: string | undefined;
+  readonly port?: number | undefined;
+
+  /**
+   * Drop a previous retarget first, so the port file / environment applies again.
+   */
+  readonly reset?: boolean | undefined;
 }
 
 /**
@@ -112,18 +128,21 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
  * and instead build the canonical ws://host:port/devtools/page/<id>.
  * Resolving at runtime (rather than hardcoding page/0) survives game restarts.
  */
-export async function discoverPageTarget(cfg: Config): Promise<PageTarget> {
-  const listUrl = `http://${cfg.host}:${cfg.port}/json/list`;
+export async function discoverPageTarget(
+  endpoint: Endpoint,
+  timeoutMs: number
+): Promise<PageTarget> {
+  const listUrl = `http://${endpoint.host}:${endpoint.port}/json/list`;
   let res: Response;
 
   try {
-    res = await fetchWithTimeout(listUrl, cfg.connectTimeoutMs);
+    res = await fetchWithTimeout(listUrl, timeoutMs);
   } catch (error) {
-    throw new GameUnreachableError(cfg, error);
+    throw new GameUnreachableError(endpoint, error);
   }
 
   if (!res.ok) {
-    throw new GameUnreachableError(cfg, new Error(`HTTP ${res.status} from ${listUrl}`));
+    throw new GameUnreachableError(endpoint, new Error(`HTTP ${res.status} from ${listUrl}`));
   }
 
   let list: unknown;
@@ -149,7 +168,7 @@ export async function discoverPageTarget(cfg: Config): Promise<PageTarget> {
     id,
     title: page.title ?? '',
     url: page.url ?? '',
-    wsUrl: `ws://${cfg.host}:${cfg.port}/devtools/page/${id}`
+    wsUrl: `ws://${endpoint.host}:${endpoint.port}/devtools/page/${id}`
   };
 }
 
@@ -205,6 +224,7 @@ class CdpConnection {
    */
   public static async open(
     cfg: Config,
+    endpoint: Endpoint,
     target: PageTarget,
     onEvent: CdpEventListener
   ): Promise<CdpConnection> {
@@ -220,7 +240,7 @@ class CdpConnection {
           /* Ignore. */
         }
 
-        reject(new GameUnreachableError(cfg));
+        reject(new GameUnreachableError(endpoint));
       }, cfg.connectTimeoutMs);
 
       ws.addEventListener(
@@ -236,7 +256,7 @@ class CdpConnection {
         'error',
         event => {
           clearTimeout(timer);
-          reject(new GameUnreachableError(cfg, event));
+          reject(new GameUnreachableError(endpoint, event));
         },
         { once: true }
       );
@@ -370,13 +390,63 @@ export class CdpClient {
   private readonly connectListeners = new Set<CdpConnectListener>();
 
   private readonly cfg: Config;
+  private readonly endpoints: EndpointResolver;
 
   public constructor(cfg: Config) {
     this.cfg = cfg;
+    this.endpoints = new EndpointResolver(cfg);
   }
 
   public get config(): Config {
     return this.cfg;
+  }
+
+  /**
+   * The endpoint of the last resolution, for reporting without re-reading the port file.
+   */
+  public get endpoint(): Endpoint {
+    return this.endpoints.current;
+  }
+
+  /**
+   * The last port-file read, or undefined when no port file is configured.
+   */
+  public get portFile(): PortFileStatus | undefined {
+    return this.endpoints.portFile;
+  }
+
+  /**
+   * Re-resolves the endpoint (re-reading the port file) without connecting.
+   */
+  public resolveEndpoint(): Promise<Endpoint> {
+    return this.endpoints.resolve();
+  }
+
+  /**
+   * Points the client at another endpoint and drops the live connection, so the next call
+   * reconnects there. Passing neither host nor port (or reset) hands the endpoint back to the
+   * port file / environment. Listeners registered via onEvent / onConnect survive the switch.
+   */
+  public retarget(options: RetargetOptions = {}): Promise<Endpoint> {
+    if (options.reset == true) {
+      this.endpoints.clearOverride();
+    }
+
+    this.endpoints.setOverride(options.host, options.port);
+
+    // Dropped rather than reconnected here: a retarget aimed at a game that is not up yet should
+    // report that from the probe, not fail the switch itself.
+    this.disconnect();
+
+    return this.endpoints.resolve();
+  }
+
+  /**
+   * Closes the live connection, if any. The next call reconnects.
+   */
+  public disconnect(): void {
+    this.conn?.close();
+    this.conn = undefined;
   }
 
   /**
@@ -404,8 +474,10 @@ export class CdpClient {
   /**
    * HTTP-only discovery, without opening a WebSocket (used by game_status).
    */
-  public discover(): Promise<PageTarget> {
-    return discoverPageTarget(this.cfg);
+  public async discover(): Promise<PageTarget> {
+    const endpoint = await this.endpoints.resolve();
+
+    return discoverPageTarget(endpoint, this.cfg.connectTimeoutMs);
   }
 
   /**
@@ -422,8 +494,11 @@ export class CdpClient {
     }
 
     this.connecting = (async () => {
-      const target = await discoverPageTarget(this.cfg);
-      const conn = await CdpConnection.open(this.cfg, target, (method, params) => {
+      // Resolved per attempt, not once at startup: this is what lets the server follow a game
+      // launched on a port picked after this process started.
+      const endpoint = await this.endpoints.resolve();
+      const target = await discoverPageTarget(endpoint, this.cfg.connectTimeoutMs);
+      const conn = await CdpConnection.open(this.cfg, endpoint, target, (method, params) => {
         this.emit(method, params);
       });
 
@@ -459,9 +534,10 @@ export class CdpClient {
       // Both 'connection closed/error' (handleClose) and 'not open' (call) are our own CdpError
       // messages, so matching on them is reliable. One retry covers a game restart mid-session.
       if (error instanceof CdpError && /closed|not open/iu.test(error.message)) {
-        this.conn?.close();
-        this.conn = undefined;
+        this.disconnect();
 
+        // Reconnecting re-resolves the endpoint, so a game that came back on another port is
+        // followed here rather than needing a manual retarget.
         const fresh = await this.connection();
 
         return fresh.call<T>(method, params);

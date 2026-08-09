@@ -5,7 +5,9 @@
       "args": ["${CLAUDE_PLUGIN_ROOT:-.}/mcp/dist/server.mjs"],
       "env": {
         "GAMEFACE_HOST": "${GAMEFACE_HOST:-localhost}",
-        "GAMEFACE_PORT": "${GAMEFACE_PORT:-9444}"
+        "GAMEFACE_PORT": "${GAMEFACE_PORT:-9444}",
+        "GAMEFACE_PORT_FILE": "${GAMEFACE_PORT_FILE:-}",
+        "GAMEFACE_PORT_FILE_KEY": "${GAMEFACE_PORT_FILE_KEY:-port}"
       }
     }
   }

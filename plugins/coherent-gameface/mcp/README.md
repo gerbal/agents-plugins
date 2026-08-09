@@ -128,6 +128,7 @@ Or in `.vscode/mcp.json` (note the `servers` key, not `mcpServers`):
 | Tool | What it does | Under the hood |
 | --- | --- | --- |
 | `game_status` | Reachability + page target + engine info + view-reload tracking (count, last reload, context id). Run first when things fail. | `/json/list` + `/json/version` + `Runtime.executionContextCreated` |
+| `game_target` | Point every other tool at another host/port at runtime, or re-resolve the port file, and probe it. | `/json/list` on the new endpoint |
 | `game_eval` | Evaluate a JS expression in the Gameface UI, returns the value as JSON. | `Runtime.evaluate` (returnByValue) |
 | `game_screenshot` | Screenshot the viewport (or a selector's box) as an inline image. | `Page.captureScreenshot` (+ `clip`) |
 | `game_dom` | DOM details (tag, classes, attributes, rect, outerHTML) for a CSS selector. | `Runtime.evaluate` |
@@ -182,8 +183,26 @@ All are optional, read by the server from the environment:
 | --- | --- | --- |
 | `GAMEFACE_HOST` | `localhost` | Host of the Gameface CDP endpoint. |
 | `GAMEFACE_PORT` | `9444` | Port of the Gameface CDP endpoint. |
+| `GAMEFACE_PORT_FILE` | _(unset)_ | File to read the live port from (see below). |
+| `GAMEFACE_PORT_FILE_KEY` | `port` | Key holding the port when that file is JSON. |
 | `GAMEFACE_CONNECT_TIMEOUT_MS` | `5000` | HTTP discovery / WebSocket open timeout. |
 | `GAMEFACE_CALL_TIMEOUT_MS` | `15000` | Per-command reply timeout. |
+
+### Following a port chosen at launch
+
+A game usually takes its debug port as a launch argument, decided after the MCP server started and
+read its environment. So the endpoint is resolved per connection attempt, from the first source
+that names a port:
+
+1. `game_target` — switch host/port at runtime and probe what answers there; `reset: true` undoes
+   the switch, and no arguments re-resolves.
+2. `GAMEFACE_PORT_FILE` — a file the launcher writes the port to, either a bare number or a JSON
+   object carrying it under `GAMEFACE_PORT_FILE_KEY`. Re-read on every connection attempt, so a
+   relaunch on another port is followed with no action from the agent.
+3. `GAMEFACE_PORT`, then the `9444` default.
+
+`game_status` reports which of these the live endpoint came from as `portSource`. A missing or
+malformed port file is not fatal: the server falls back and reports why under `portFile`.
 
 ## Troubleshooting
 

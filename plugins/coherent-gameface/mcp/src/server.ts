@@ -26,6 +26,7 @@ import {
   gameQuery,
   gameScreenshot,
   gameStatus,
+  gameTarget,
   gameType,
   gameWait
 } from './tools';
@@ -39,6 +40,8 @@ const { version: VERSION } = JSON.parse(
   // oxlint-disable-next-line node/no-sync -- One-shot startup read, nothing is serving yet.
   readFileSync(new URL('../package.json', import.meta.url), 'utf8')
 ) as { version: string };
+
+const MAX_PORT = 65_535;
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -65,6 +68,40 @@ async function main(): Promise<void> {
       `
     },
     () => gameStatus(client, reloads)
+  );
+
+  server.registerTool(
+    'game_target',
+    {
+      title: `Point at another Gameface endpoint`,
+      description: oneLine`
+        Switch the host/port every other game_* tool talks to, without restarting the server, and
+        probe the result.
+        Use it when the application runs on a debug port that was chosen after this server started
+        (the usual case: the port is a launch argument), which no environment variable can reach.
+        Called with no arguments it re-resolves the endpoint, re-reading GAMEFACE_PORT_FILE if one
+        is configured; reset drops a previous switch and goes back to the file / environment.
+        The switch itself always succeeds; the report says whether anything answered there.
+      `,
+      inputSchema: {
+        port: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_PORT)
+          .optional()
+          .describe(`Port of the CDP endpoint to talk to from now on`),
+        host: z
+          .string()
+          .optional()
+          .describe(`Host of the CDP endpoint to talk to from now on (default: unchanged)`),
+        reset: z.boolean().optional().describe(oneLine`
+            Drop a previous game_target switch, handing the endpoint back to GAMEFACE_PORT_FILE /
+            GAMEFACE_PORT (default false)
+          `)
+      }
+    },
+    ({ port, host, reset }) => gameTarget(client, { port, host, reset })
   );
 
   server.registerTool(
@@ -682,9 +719,16 @@ async function main(): Promise<void> {
 
   await server.connect(transport);
 
+  // Resolved rather than read off the config so the line names the endpoint the first call will
+  // actually use, port file included.
+  const endpoint = await client.resolveEndpoint();
+
   // noinspection HttpUrlsUsage
   process.stderr.write(
-    `gameface MCP server v${VERSION} ready (target http://${config.host}:${config.port})\n`
+    `${oneLine`
+      gameface MCP server v${VERSION} ready
+      (target http://${endpoint.host}:${endpoint.port}, port from: ${endpoint.source})
+    `}\n`
   );
 }
 
