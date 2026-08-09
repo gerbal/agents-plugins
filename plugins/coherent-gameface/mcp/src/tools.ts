@@ -7,6 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { oneLine } from 'common-tags';
 import type { CdpClient } from './cdp';
+import type { PortFileStatus } from './endpoint';
 import {
   type EvaluateResult,
   type RemoteObject,
@@ -157,7 +158,9 @@ export async function gameStatus(
   client: CdpClient,
   reloads: ReloadTracker
 ): Promise<CallToolResult> {
-  const { host, port } = client.config;
+  // Resolved before discovery so the reported endpoint is the one about to be probed, including
+  // when a port file moved it since the last call.
+  const { host, port, source } = await client.resolveEndpoint();
 
   try {
     const target = await client.discover();
@@ -197,6 +200,8 @@ export async function gameStatus(
         {
           reachable: true,
           endpoint: `http://${host}:${port}`,
+          portSource: source,
+          portFile: describePortFile(client.portFile),
           target: { id: target.id, url: target.url, title: target.title, wsUrl: target.wsUrl },
           browser,
           cdpProtocol: protocol,
@@ -222,10 +227,13 @@ export async function gameStatus(
         {
           reachable: false,
           endpoint: `http://${host}:${port}`,
+          portSource: source,
+          portFile: describePortFile(client.portFile),
           error: error instanceof Error ? error.message : String(error),
           hint: oneLine`
             Launch the Gameface application with its CDP debug port open, then retry.
-            Override host/port via GAMEFACE_HOST / GAMEFACE_PORT.
+            If it is up on a different port, switch to it with game_target, or set
+            GAMEFACE_HOST / GAMEFACE_PORT / GAMEFACE_PORT_FILE.
           `
         },
         null,
@@ -233,6 +241,75 @@ export async function gameStatus(
       )
     );
   }
+}
+
+export interface GameTargetOptions {
+  readonly host?: string | undefined;
+  readonly port?: number | undefined;
+  readonly reset?: boolean | undefined;
+}
+
+/**
+ * Switches the endpoint the client talks to, or re-resolves it, and probes the result.
+ * Never throws: an unreachable new endpoint is reported, not raised, since the switch itself
+ * succeeded and the game may simply not be up yet.
+ */
+export async function gameTarget(
+  client: CdpClient,
+  options: GameTargetOptions = {}
+): Promise<CallToolResult> {
+  const before = client.endpoint;
+  const after = await client.retarget(options);
+  const changed = after.host != before.host || after.port != before.port;
+
+  let reachable = false;
+  let target: string | undefined;
+  let error: string | undefined;
+
+  try {
+    const page = await client.discover();
+
+    reachable = true;
+    target = page.url;
+  } catch (probeError) {
+    error = probeError instanceof Error ? probeError.message : String(probeError);
+  }
+
+  return text(
+    JSON.stringify(
+      {
+        endpoint: `http://${after.host}:${after.port}`,
+        portSource: after.source,
+        portFile: describePortFile(client.portFile),
+        changed,
+        previousEndpoint: changed ? `http://${before.host}:${before.port}` : undefined,
+        reachable,
+        target,
+        error,
+        // The buffers are per-server, not per-endpoint: what they hold after a switch was
+        // captured from whatever was on the other end.
+        note: changed
+          ? oneLine`
+              Console history and breakpoints predate the switch; breakpoints re-bind on the next
+              connection, console entries do not carry over.
+            `
+          : undefined
+      },
+      null,
+      2
+    )
+  );
+}
+
+/**
+ * Renders the port-file status for a tool report, or undefined when no port file is configured.
+ */
+function describePortFile(status: PortFileStatus | undefined): Record<string, unknown> | undefined {
+  if (!status) {
+    return undefined;
+  }
+
+  return { path: status.path, key: status.key, port: status.port, error: status.error };
 }
 
 /**

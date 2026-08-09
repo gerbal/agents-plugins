@@ -20,6 +20,15 @@ A dead endpoint mid-session usually means the game crashed or was closed.
 Report it and wait for the developer to relaunch the game; retry-looping cannot help, and testing that was interrupted mid-action may have left the UI in a state worth re-checking with a screenshot once the game is back.
 No reconnect ritual exists or is needed: the server re-resolves the page target on the next call after the game returns.
 
+## When the game is on another port
+
+`game_status` reporting the endpoint unreachable does not mean the game is down: it may be up on a port the server was never told about.
+A debug port is usually a launch argument, chosen after your session (and this server with it) started, so no environment variable could have named it — which is why the endpoint is resolved per connection attempt rather than once at startup.
+`game_status` reports `portSource` for exactly this: `default` or `env` means nobody told the server where the game is, and an unreachable endpoint from either is the case to suspect first.
+`game_target` with a `port` switches every other `game_*` tool over and probes what answers there, so one call both fixes and confirms; `reset: true` undoes it and no arguments just re-resolves.
+Ask the developer which port the game was launched on rather than sweeping ports: on a machine running two instances, a probe can land on the other one, and nothing in the CDP target identifies which is which.
+A `portSource` of `file` means a `GAMEFACE_PORT_FILE` is wired up and the port follows relaunches on its own; there, prefer a bare `game_target` (re-resolve) over naming a port by hand, and read `portFile.error` when it reports a stale endpoint.
+
 ## Finding elements
 
 `game_query` is the built-in element search; the schema covers its parameters, so what follows is how to read and use it.
