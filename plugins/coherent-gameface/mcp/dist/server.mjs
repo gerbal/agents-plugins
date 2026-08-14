@@ -31893,7 +31893,7 @@ async function gameTarget(client, options = {}) {
     reachable,
     target,
     error: error51,
-    note: changed ? import_common_tags3.oneLine`
+    note: changed ? import_common_tags4.oneLine`
               Console history and breakpoints predate the switch; breakpoints re-bind on the next
               connection, console entries do not carry over.
             ` : undefined
@@ -32839,7 +32839,7 @@ async function main() {
   }, () => gameStatus(client, reloads));
   server.registerTool("game_target", {
     title: `Point at another Gameface endpoint`,
-    description: import_common_tags4.oneLine`
+    description: import_common_tags5.oneLine`
         Switch the host/port every other game_* tool talks to, without restarting the server, and
         probe the result.
         Use it when the application runs on a debug port that was chosen after this server started
@@ -32851,7 +32851,7 @@ async function main() {
     inputSchema: {
       port: exports_external.number().int().min(1).max(MAX_PORT2).optional().describe(`Port of the CDP endpoint to talk to from now on`),
       host: exports_external.string().optional().describe(`Host of the CDP endpoint to talk to from now on (default: unchanged)`),
-      reset: exports_external.boolean().optional().describe(import_common_tags4.oneLine`
+      reset: exports_external.boolean().optional().describe(import_common_tags5.oneLine`
             Drop a previous game_target switch, handing the endpoint back to GAMEFACE_PORT_FILE /
             GAMEFACE_PORT (default false)
           `)
@@ -33202,7 +33202,7 @@ async function main() {
   const transport = new StdioServerTransport;
   await server.connect(transport);
   const endpoint = await client.resolveEndpoint();
-  process.stderr.write(`${import_common_tags4.oneLine`
+  process.stderr.write(`${import_common_tags5.oneLine`
       gameface MCP server v${VERSION} ready
       (target http://${endpoint.host}:${endpoint.port}, port from: ${endpoint.source})
     `}
